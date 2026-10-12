@@ -1,10 +1,17 @@
 import os
 import random
+import string
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
 DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
+
+def generate_garbled_text():
+    # Mix of letters, numbers, and wild symbols
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;':\",./<>?~`~# "
+    length = random.randint(20, 50)
+    return "".join(random.choice(alphabet) for _ in range(length)) + "\n"
 
 def main():
     if not SERVICE_ACCOUNT_JSON or not DOCUMENT_ID:
@@ -16,22 +23,38 @@ def main():
     )
     service = build('docs', 'v1', credentials=creds_info)
 
-    random_phrases = [
-        "[Bot]: Automated check-in successful. All systems nominal.\n",
-        "[Bot]: Random thought of the day: Code compiles, nobody knows why.\n",
-        "[Bot]: Ping received from the GitHub cloud execution runner.\n",
-        "[Bot]: Status update: Document successfully modified by automated script.\n"
-    ]
-    chosen_text = random.choice(random_phrases)
+    garbled_text = f"[GLITCH_BOT]: {generate_garbled_text()}"
+    insert_index = 1
 
-    # Insert right at the beginning of the document (index 1)
+    # 1. Insert the garbled text at the top
+    # 2. Update the text style to explicitly force white color
     requests = [
         {
             'insertText': {
                 'location': {
-                    'index': 1,
+                    'index': insert_index,
                 },
-                'text': chosen_text
+                'text': garbled_text
+            }
+        },
+        {
+            'updateTextStyle': {
+                'range': {
+                    'startIndex': insert_index,
+                    'endIndex': insert_index + len(garbled_text)
+                },
+                'textStyle': {
+                    'foregroundColor': {
+                        'color': {
+                            'rgbColor': {
+                                'red': 1.0,
+                                'green': 1.0,
+                                'blue': 1.0
+                            }
+                        }
+                    }
+                },
+                'fields': 'foregroundColor'
             }
         }
     ]
@@ -39,7 +62,7 @@ def main():
     result = service.documents().batchUpdate(
         documentId=DOCUMENT_ID, body={'requests': requests}
     ).execute()
-    print(f"Successfully updated document at the top! Reply: {result}")
+    print(f"Successfully injected white garbled text! Reply: {result}")
 
 if __name__ == '__main__':
     main()
