@@ -1,11 +1,9 @@
-name: Google Doc Randomizer Bot
+name: Google Doc Glitch Bot
 
 on:
-  # Allows you to run it manually from the GitHub Actions tab
-  workflow_dispatch:
-  # Optional: Run it automatically on a schedule (e.g., every day at midnight UTC)
-  schedule:
-    - cron: '* * * * *'
+  workflow_dispatch: # Keeps the manual "Run workflow" button active on GitHub
+  repository_dispatch:
+    types: [trigger-bot] # Matches the event_type sent by your external cron service
 
 jobs:
   update-doc:
