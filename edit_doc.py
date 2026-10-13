@@ -180,8 +180,7 @@ def main():
 
     if occurrences:
         print(f"Found {len(occurrences)} 'dochead' trigger(s) across all document tabs.")
-        
-        # CRITICAL FIX: Sort in reverse order (highest index first) so index shifts don't break prior replacements
+        # Sort in reverse order (highest index first) to prevent shift collisions
         occurrences.sort(key=lambda x: x['start'], reverse=True)
         
         for item in occurrences:
@@ -200,20 +199,9 @@ def main():
                 range_arg['tabId'] = tab_id
                 location_arg['tabId'] = tab_id
 
-            # Cleanly replace 'dochead' range with the bot response
-            requests.append({
-                'deleteContentRange': {
-                    'range': range_arg
-                }
-            })
-            requests.append({
-                'insertText': {
-                    'location': location_arg,
-                    'text': reply_text
-                }
-            })
+            requests.append({'deleteContentRange': {'range': range_arg}})
+            requests.append({'insertText': {'location': location_arg, 'text': reply_text}})
     else:
-        # No triggers found: pick a random tab and a safe random index inside it
         target_tab = random.choice(all_tabs)
         tab_properties = target_tab.get('tabProperties', {})
         tab_id = tab_properties.get('tabId')
@@ -228,28 +216,32 @@ def main():
         if tab_id:
             location_arg['tabId'] = tab_id
 
-        requests.append({
-            'insertText': {
-                'location': location_arg,
-                'text': glitch_text
-            }
-        })
+        requests.append({'insertText': {'location': location_arg, 'text': glitch_text}})
         model.train(glitch_text)
 
-    # 5. Append model memory block at the end of the first tab
-    first_tab = all_tabs[0]
-    first_tab_id = first_tab.get('tabProperties', {}).get('tabId')
-    document_tab = first_tab.get('documentTab', {})
-    body_content = document_tab.get('body', {}).get('content', [])
-    doc_end_index = body_content[-1].get('endIndex', 1) - 1 if body_content else 1
+    # Execute Step 1: Content replacements / triggers
+    if requests:
+        service.documents().batchUpdate(
+            documentId=document_id, body={'requests': requests}
+        ).execute()
+
+    # 5. Step 2: Fetch fresh document state to get the exact new end index for memory storage
+    doc_fresh = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
+    fresh_tabs = get_all_tabs(doc_fresh)
+    first_tab_fresh = fresh_tabs[0]
+    first_tab_id = first_tab_fresh.get('tabProperties', {}).get('tabId')
+    document_tab_fresh = first_tab_fresh.get('documentTab', {})
+    body_content_fresh = document_tab_fresh.get('body', {}).get('content', [])
+    doc_end_index = body_content_fresh[-1].get('endIndex', 1) - 1 if body_content_fresh else 1
 
     bottom_memory_block = f"\n[MODEL_MEMORY: {model.to_json()}]\n"
-    
+    memory_requests = []
+
     end_location_arg = {'index': doc_end_index}
     if first_tab_id:
         end_location_arg['tabId'] = first_tab_id
 
-    requests.append({
+    memory_requests.append({
         'insertText': {
             'location': end_location_arg,
             'text': bottom_memory_block
@@ -263,7 +255,7 @@ def main():
     if first_tab_id:
         text_style_range['tabId'] = first_tab_id
 
-    requests.append({
+    memory_requests.append({
         'updateTextStyle': {
             'range': text_style_range,
             'textStyle': {
@@ -277,8 +269,9 @@ def main():
         }
     })
 
+    # Execute Step 2: Append & hide model memory block
     result = service.documents().batchUpdate(
-        documentId=document_id, body={'requests': requests}
+        documentId=document_id, body={'requests': memory_requests}
     ).execute()
     print(f"Document updated successfully across tabs! Reply: {result}")
 
