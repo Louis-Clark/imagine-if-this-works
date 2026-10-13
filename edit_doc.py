@@ -84,6 +84,7 @@ def get_all_tabs(doc):
 def extract_all_docs_data(doc):
     full_text = ""
     saved_memory = None
+    full_memory_string = None
     all_tabs = get_all_tabs(doc)
 
     for tab in all_tabs:
@@ -97,42 +98,20 @@ def extract_all_docs_data(doc):
                         full_text += content + "\n"
                         if "[MODEL_MEMORY:" in content:
                             try:
-                                start = content.index("[MODEL_MEMORY:") + len("[MODEL_MEMORY:")
-                                end = content.index("]", start)
-                                saved_memory = content[start:end].strip()
+                                start = content.index("[MODEL_MEMORY:")
+                                end = content.index("]", start) + 1
+                                full_memory_string = content[start:end]
+                                mem_start = start + len("[MODEL_MEMORY:")
+                                mem_end = content.index("]", start)
+                                saved_memory = content[mem_start:mem_end].strip()
                             except ValueError:
                                 pass
-    return full_text, saved_memory, all_tabs
-
-def find_dochead_occurrences_across_tabs(all_tabs):
-    occurrences = []
-    for tab in all_tabs:
-        tab_properties = tab.get('tabProperties', {})
-        tab_id = tab_properties.get('tabId')
-        document_tab = tab.get('documentTab', {})
-        body = document_tab.get('body', {}).get('content', [])
-        
-        for element in body:
-            if 'paragraph' in element:
-                for elem in element['paragraph'].get('elements', []):
-                    if 'textRun' in elem:
-                        text = elem['textRun'].get('content', '')
-                        start_idx = elem.get('startIndex', 1)
-                        for match in re.finditer(r'\bdochead\b', text, re.IGNORECASE):
-                            match_start = start_idx + match.start()
-                            match_end = start_idx + match.end()
-                            occurrences.append({
-                                'start': match_start,
-                                'end': match_end,
-                                'text': text,
-                                'tabId': tab_id
-                            })
-    return occurrences
+    return full_text, saved_memory, full_memory_string, all_tabs
 
 def generate_garbled_text():
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;':\",./<>?~`~# "
     length = random.randint(20, 50)
-    return "".join(random.choice(alphabet) for _ in range(length)) + "\n"
+    return "".join(random.choice(alphabet) for _ in range(length))
 
 def main():
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
@@ -147,9 +126,9 @@ def main():
     )
     service = build('docs', 'v1', credentials=creds_info)
 
-    # 1. Fetch document state with tabs content enabled
+    # 1. Fetch document state across all tabs
     doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
-    full_text, saved_memory, all_tabs = extract_all_docs_data(doc)
+    full_text, saved_memory, full_memory_string, all_tabs = extract_all_docs_data(doc)
 
     # 2. Initialize and load model memory
     model = DocMarkovNeuralMemory(n_gram=2)
@@ -163,107 +142,56 @@ def main():
     # 3. Train on everything written across all tabs
     model.train(full_text)
 
-    # 4. Search for all 'dochead' occurrences across ALL tabs
-    occurrences = find_dochead_occurrences_across_tabs(all_tabs)
     requests = []
 
-    if occurrences:
-        print(f"Found {len(occurrences)} 'dochead' trigger(s) across all document tabs.")
-        occurrences.sort(key=lambda x: x['start'], reverse=True)
+    # 4. Handle triggers or random glitches using text replacement
+    if re.search(r'\bdochead\b', full_text, re.IGNORECASE):
+        print("Found 'dochead' trigger(s) across document tabs.")
+        response = model.generate(max_words=14)
+        reply_text = f"[GLITCH_BOT]: {response}"
         
-        for item in occurrences:
-            start = item['start']
-            end = item['end']
-            context_text = item['text']
-            tab_id = item['tabId']
-            
-            context_words = context_text.split()
-            response = model.generate(seed_words=context_words, max_words=14)
-            reply_text = f"\n[GLITCH_BOT]: {response}\n"
-            
-            range_arg = {'startIndex': start, 'endIndex': end}
-            location_arg = {'index': start}
-            if tab_id:
-                range_arg['tabId'] = tab_id
-                location_arg['tabId'] = tab_id
-
-            requests.append({'deleteContentRange': {'range': range_arg}})
-            requests.append({'insertText': {'location': location_arg, 'text': reply_text}})
+        # Globally replace 'dochead' across all tabs
+        requests.append({
+            'replaceAllText': {
+                'containsText': {'text': 'dochead', 'matchCase': False},
+                'replaceText': reply_text
+            }
+        })
     else:
-        # Pick a random tab and safely append to the end of its body
-        target_tab = random.choice(all_tabs)
-        tab_properties = target_tab.get('tabProperties', {})
-        tab_id = tab_properties.get('tabId')
-        document_tab = target_tab.get('documentTab', {})
-        body_content = document_tab.get('body', {}).get('content', [])
+        print("No 'dochead' triggers found. Injecting random glitch.")
+        glitch_text = generate_garbled_text()
+        reply_text = f"\n[GLITCH_BOT]: {glitch_text}\n"
         
-        tab_end_index = body_content[-1].get('endIndex', 1) - 1 if body_content else 1
+        # Inject right before the model memory block using text matching
+        if full_memory_string:
+            requests.append({
+                'replaceAllText': {
+                    'containsText': {'text': full_memory_string, 'matchCase': True},
+                    'replaceText': f"{reply_text}\n{full_memory_string}"
+                }
+            })
+        else:
+            print("Warning: No model memory block found in document. Please ensure a [MODEL_MEMORY: {}] tag exists.")
         
-        glitch_text = f"\n[GLITCH_BOT]: {generate_garbled_text()}\n"
-        print(f"No triggers found. Injecting random glitch into tab '{tab_properties.get('title', 'Untitled')}' at index {tab_end_index}.")
-        
-        location_arg = {'index': tab_end_index}
-        if tab_id:
-            location_arg['tabId'] = tab_id
+        model.train(reply_text)
 
-        requests.append({'insertText': {'location': location_arg, 'text': glitch_text}})
-        model.train(glitch_text)
+    # 5. Update the model memory block safely via text replacement
+    new_memory_block = f"[MODEL_MEMORY: {model.to_json()}]"
+    if full_memory_string:
+        requests.append({
+            'replaceAllText': {
+                'containsText': {'text': full_memory_string, 'matchCase': True},
+                'replaceText': new_memory_block
+            }
+        })
 
-    # Execute Step 1: Content replacements / triggers
     if requests:
-        service.documents().batchUpdate(
+        result = service.documents().batchUpdate(
             documentId=document_id, body={'requests': requests}
         ).execute()
-
-    # 5. Step 2: Fetch fresh document state to get the exact new end index for memory storage
-    doc_fresh = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
-    fresh_tabs = get_all_tabs(doc_fresh)
-    first_tab_fresh = fresh_tabs[0]
-    first_tab_id = first_tab_fresh.get('tabProperties', {}).get('tabId')
-    document_tab_fresh = first_tab_fresh.get('documentTab', {})
-    body_content_fresh = document_tab_fresh.get('body', {}).get('content', [])
-    doc_end_index = body_content_fresh[-1].get('endIndex', 1) - 1 if body_content_fresh else 1
-
-    bottom_memory_block = f"\n[MODEL_MEMORY: {model.to_json()}]\n"
-    memory_requests = []
-
-    end_location_arg = {'index': doc_end_index}
-    if first_tab_id:
-        end_location_arg['tabId'] = first_tab_id
-
-    memory_requests.append({
-        'insertText': {
-            'location': end_location_arg,
-            'text': bottom_memory_block
-        }
-    })
-    
-    text_style_range = {
-        'startIndex': doc_end_index,
-        'endIndex': doc_end_index + len(bottom_memory_block)
-    }
-    if first_tab_id:
-        text_style_range['tabId'] = first_tab_id
-
-    memory_requests.append({
-        'updateTextStyle': {
-            'range': text_style_range,
-            'textStyle': {
-                'foregroundColor': {
-                    'color': {
-                        'rgbColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}
-                    }
-                }
-            },
-            'fields': 'foregroundColor'
-        }
-    })
-
-    # Execute Step 2: Append & hide model memory block
-    result = service.documents().batchUpdate(
-        documentId=document_id, body={'requests': memory_requests}
-    ).execute()
-    print(f"Document updated successfully across tabs! Reply: {result}")
+        print(f"Document updated successfully across tabs! Reply: {result}")
+    else:
+        print("No updates required.")
 
 if __name__ == '__main__':
     main()
