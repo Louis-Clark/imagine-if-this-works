@@ -8,7 +8,6 @@ SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
 DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
 def generate_garbled_text():
-    # Mix of letters, numbers, and wild symbols
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;':\",./<>?~`~# "
     length = random.randint(20, 50)
     return "".join(random.choice(alphabet) for _ in range(length)) + "\n"
