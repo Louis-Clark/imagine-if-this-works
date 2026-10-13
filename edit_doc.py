@@ -15,7 +15,8 @@ class DocMarkovNeuralMemory:
         self.weights = {}
 
     def to_json(self):
-        return json.dumps(self.weights)
+        # Single-line JSON format for safe string matching
+        return json.dumps(self.weights, separators=(',', ':'))
 
     def from_json(self, json_str):
         try:
@@ -96,16 +97,13 @@ def extract_all_docs_data(doc):
                     if 'textRun' in elem:
                         content = elem['textRun'].get('content', '')
                         full_text += content + "\n"
-                        if "[MODEL_MEMORY:" in content:
-                            try:
-                                start = content.index("[MODEL_MEMORY:")
-                                end = content.index("]", start) + 1
-                                full_memory_string = content[start:end]
-                                mem_start = start + len("[MODEL_MEMORY:")
-                                mem_end = content.index("]", start)
-                                saved_memory = content[mem_start:mem_end].strip()
-                            except ValueError:
-                                pass
+
+    # Extract single-line memory block securely
+    match = re.search(r'\[MODEL_MEMORY:\s*(\{.*?\})\s*\]', full_text)
+    if match:
+        full_memory_string = match.group(0)
+        saved_memory = match.group(1)
+
     return full_text, saved_memory, full_memory_string, all_tabs
 
 def generate_garbled_text():
@@ -144,13 +142,13 @@ def main():
 
     requests = []
 
-    # 4. Handle triggers or random glitches using text replacement
+    # 4. Check for 'dochead' triggers or fallback to random spouting
     if re.search(r'\bdochead\b', full_text, re.IGNORECASE):
-        print("Found 'dochead' trigger(s) across document tabs.")
+        print("Found 'dochead' trigger(s) across document tabs. Responding...")
         response = model.generate(max_words=14)
         reply_text = f"[GLITCH_BOT]: {response}"
         
-        # Globally replace 'dochead' across all tabs
+        # Replace all 'dochead' mentions across tabs with the bot response
         requests.append({
             'replaceAllText': {
                 'containsText': {'text': 'dochead', 'matchCase': False},
@@ -158,24 +156,31 @@ def main():
             }
         })
     else:
-        print("No 'dochead' triggers found. Injecting random glitch.")
-        glitch_text = generate_garbled_text()
-        reply_text = f"\n[GLITCH_BOT]: {glitch_text}\n"
+        print("No 'dochead' triggers found. Spouting random glitch into document stream...")
+        # Generate Markov-driven or garbled text spout
+        if len(model.weights) > 0:
+            spout_content = model.generate(max_words=12)
+        else:
+            spout_content = generate_garbled_text()
+            
+        reply_text = f"\n[GLITCH_BOT (Autonomous Spout)]: {spout_content}\n"
         
-        # Inject right before the model memory block using text matching
         if full_memory_string:
+            # Inject the spouted text right before the persistent model memory block
+            placeholder = "[MODEL_MEMORY_PENDING]"
             requests.append({
                 'replaceAllText': {
                     'containsText': {'text': full_memory_string, 'matchCase': True},
-                    'replaceText': f"{reply_text}\n{full_memory_string}"
+                    'replaceText': f"{reply_text}\n{placeholder}"
                 }
             })
+            full_memory_string = placeholder
         else:
-            print("Warning: No model memory block found in document. Please ensure a [MODEL_MEMORY: {}] tag exists.")
+            raise ValueError("No [MODEL_MEMORY: {...}] block found in the document. Please ensure one exists at the bottom.")
         
         model.train(reply_text)
 
-    # 5. Update the model memory block safely via text replacement
+    # 5. Update/Store the latest neural memory weights into the document block
     new_memory_block = f"[MODEL_MEMORY: {model.to_json()}]"
     if full_memory_string:
         requests.append({
@@ -185,11 +190,12 @@ def main():
             }
         })
 
+    # Execute updates safely via text matching (0 index errors)
     if requests:
         result = service.documents().batchUpdate(
             documentId=document_id, body={'requests': requests}
         ).execute()
-        print(f"Document updated successfully across tabs! Reply: {result}")
+        print(f"Document updated successfully across tabs! Result: {result}")
     else:
         print("No updates required.")
 
