@@ -129,17 +129,6 @@ def find_dochead_occurrences_across_tabs(all_tabs):
                             })
     return occurrences
 
-def get_safe_insertion_points_for_tab(tab):
-    indices = [1]
-    document_tab = tab.get('documentTab', {})
-    body_content = document_tab.get('body', {}).get('content', [])
-    for element in body_content:
-        if 'paragraph' in element:
-            for elem in element['paragraph'].get('elements', []):
-                if 'startIndex' in elem:
-                    indices.append(elem['startIndex'])
-    return indices
-
 def generate_garbled_text():
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;':\",./<>?~`~# "
     length = random.randint(20, 50)
@@ -180,7 +169,6 @@ def main():
 
     if occurrences:
         print(f"Found {len(occurrences)} 'dochead' trigger(s) across all document tabs.")
-        # Sort in reverse order (highest index first) to prevent shift collisions
         occurrences.sort(key=lambda x: x['start'], reverse=True)
         
         for item in occurrences:
@@ -202,17 +190,19 @@ def main():
             requests.append({'deleteContentRange': {'range': range_arg}})
             requests.append({'insertText': {'location': location_arg, 'text': reply_text}})
     else:
+        # Pick a random tab and safely append to the end of its body
         target_tab = random.choice(all_tabs)
         tab_properties = target_tab.get('tabProperties', {})
         tab_id = tab_properties.get('tabId')
+        document_tab = target_tab.get('documentTab', {})
+        body_content = document_tab.get('body', {}).get('content', [])
         
-        safe_indices = get_safe_insertion_points_for_tab(target_tab)
-        random_index = random.choice(safe_indices)
+        tab_end_index = body_content[-1].get('endIndex', 1) - 1 if body_content else 1
         
         glitch_text = f"\n[GLITCH_BOT]: {generate_garbled_text()}\n"
-        print(f"No triggers found. Injecting random glitch into tab '{tab_properties.get('title', 'Untitled')}' at index {random_index}.")
+        print(f"No triggers found. Injecting random glitch into tab '{tab_properties.get('title', 'Untitled')}' at index {tab_end_index}.")
         
-        location_arg = {'index': random_index}
+        location_arg = {'index': tab_end_index}
         if tab_id:
             location_arg['tabId'] = tab_id
 
