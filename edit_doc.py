@@ -10,12 +10,13 @@ SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
 DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
 class DocMarkovNeuralMemory:
-    def __init__(self, n_gram=2):
+    def __init__(self, n_gram=2, max_keys=250):
         self.n_gram = n_gram
+        self.max_keys = max_keys
         self.weights = {}
 
     def to_json(self):
-        # Single-line JSON format for safe string matching
+        # Keep JSON strictly single-line and compact to prevent API matching errors
         return json.dumps(self.weights, separators=(',', ':'))
 
     def from_json(self, json_str):
@@ -38,6 +39,15 @@ class DocMarkovNeuralMemory:
             
             current_score = self.weights[key].get(next_word, 0.0)
             self.weights[key][next_word] = current_score + 1.0
+            
+        # Cap weights size to prevent exponential bloat and API precondition failures
+        if len(self.weights) > self.max_keys:
+            sorted_keys = sorted(
+                self.weights.keys(), 
+                key=lambda k: sum(self.weights[k].values()), 
+                reverse=True
+            )
+            self.weights = {k: self.weights[k] for k in sorted_keys[:self.max_keys]}
 
     def generate(self, seed_words=None, max_words=14):
         if not self.weights:
@@ -98,7 +108,7 @@ def extract_all_docs_data(doc):
                         content = elem['textRun'].get('content', '')
                         full_text += content + "\n"
 
-    # Extract single-line memory block securely
+    # Securely match the single-line memory block
     match = re.search(r'\[MODEL_MEMORY:\s*(\{.*?\})\s*\]', full_text)
     if match:
         full_memory_string = match.group(0)
@@ -129,7 +139,7 @@ def main():
     full_text, saved_memory, full_memory_string, all_tabs = extract_all_docs_data(doc)
 
     # 2. Initialize and load model memory
-    model = DocMarkovNeuralMemory(n_gram=2)
+    model = DocMarkovNeuralMemory(n_gram=2, max_keys=250)
     if saved_memory:
         model.from_json(saved_memory)
         print("Loaded neural memory from document storage block.")
@@ -142,13 +152,12 @@ def main():
 
     requests = []
 
-    # 4. Check for 'dochead' triggers or fallback to random spouting
+    # 4. Check for 'dochead' triggers or fallback to autonomous spouting
     if re.search(r'\bdochead\b', full_text, re.IGNORECASE):
         print("Found 'dochead' trigger(s) across document tabs. Responding...")
         response = model.generate(max_words=14)
         reply_text = f"[GLITCH_BOT]: {response}"
         
-        # Replace all 'dochead' mentions across tabs with the bot response
         requests.append({
             'replaceAllText': {
                 'containsText': {'text': 'dochead', 'matchCase': False},
@@ -157,16 +166,10 @@ def main():
         })
     else:
         print("No 'dochead' triggers found. Spouting random glitch into document stream...")
-        # Generate Markov-driven or garbled text spout
-        if len(model.weights) > 0:
-            spout_content = model.generate(max_words=12)
-        else:
-            spout_content = generate_garbled_text()
-            
+        spout_content = model.generate(max_words=12) if len(model.weights) > 0 else generate_garbled_text()
         reply_text = f"\n[GLITCH_BOT (Autonomous Spout)]: {spout_content}\n"
         
         if full_memory_string:
-            # Inject the spouted text right before the persistent model memory block
             placeholder = "[MODEL_MEMORY_PENDING]"
             requests.append({
                 'replaceAllText': {
@@ -176,11 +179,11 @@ def main():
             })
             full_memory_string = placeholder
         else:
-            raise ValueError("No [MODEL_MEMORY: {...}] block found in the document. Please ensure one exists at the bottom.")
+            raise ValueError("No [MODEL_MEMORY: {...}] block found in the document. Please add one at the bottom of your first tab.")
         
         model.train(reply_text)
 
-    # 5. Update/Store the latest neural memory weights into the document block
+    # 5. Update/Store the capped neural memory weights into the document block
     new_memory_block = f"[MODEL_MEMORY: {model.to_json()}]"
     if full_memory_string:
         requests.append({
@@ -190,7 +193,7 @@ def main():
             }
         })
 
-    # Execute updates safely via text matching (0 index errors)
+    # Execute batch update cleanly with zero index risk
     if requests:
         result = service.documents().batchUpdate(
             documentId=document_id, body={'requests': requests}
