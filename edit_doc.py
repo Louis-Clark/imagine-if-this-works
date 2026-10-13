@@ -70,25 +70,75 @@ class DocMarkovNeuralMemory:
             
         return " ".join(result)
 
-def extract_doc_data(doc):
+def add_current_and_child_tabs(tab, all_tabs):
+    all_tabs.append(tab)
+    for child_tab in tab.get('childTabs', []):
+        add_current_and_child_tabs(child_tab, all_tabs)
+
+def get_all_tabs(doc):
+    all_tabs = []
+    for tab in doc.get('tabs', []):
+        add_current_and_child_tabs(tab, all_tabs)
+    return all_tabs
+
+def extract_all_docs_data(doc):
     full_text = ""
     saved_memory = None
-    
-    body = doc.get('body', {}).get('content', [])
-    for element in body:
+    all_tabs = get_all_tabs(doc)
+
+    for tab in all_tabs:
+        document_tab = tab.get('documentTab', {})
+        body = document_tab.get('body', {}).get('content', [])
+        for element in body:
+            if 'paragraph' in element:
+                for elem in element['paragraph'].get('elements', []):
+                    if 'textRun' in elem:
+                        content = elem['textRun'].get('content', '')
+                        full_text += content + "\n"
+                        if "[MODEL_MEMORY:" in content:
+                            try:
+                                start = content.index("[MODEL_MEMORY:") + len("[MODEL_MEMORY:")
+                                end = content.index("]", start)
+                                saved_memory = content[start:end].strip()
+                            except ValueError:
+                                pass
+    return full_text, saved_memory, all_tabs
+
+def find_dochead_occurrences_across_tabs(all_tabs):
+    occurrences = []
+    for tab in all_tabs:
+        tab_properties = tab.get('tabProperties', {})
+        tab_id = tab_properties.get('tabId')
+        document_tab = tab.get('documentTab', {})
+        body = document_tab.get('body', {}).get('content', [])
+        
+        for element in body:
+            if 'paragraph' in element:
+                for elem in element['paragraph'].get('elements', []):
+                    if 'textRun' in elem:
+                        text = elem['textRun'].get('content', '')
+                        start_idx = elem.get('startIndex', 1)
+                        for match in re.finditer(r'\bdochead\b', text, re.IGNORECASE):
+                            match_start = start_idx + match.start()
+                            match_end = start_idx + match.end()
+                            occurrences.append({
+                                'start': match_start,
+                                'end': match_end,
+                                'text': text,
+                                'tabId': tab_id
+                            })
+    return occurrences
+
+def get_safe_insertion_points_for_tab(tab):
+    indices = [1]
+    document_tab = tab.get('documentTab', {})
+    body_content = document_tab.get('body', {}).get('content', [])
+    for element in body_content:
         if 'paragraph' in element:
             for elem in element['paragraph'].get('elements', []):
-                if 'textRun' in elem:
-                    content = elem['textRun'].get('content', '')
-                    full_text += content
-                    if "[MODEL_MEMORY:" in content:
-                        try:
-                            start = content.index("[MODEL_MEMORY:") + len("[MODEL_MEMORY:")
-                            end = content.index("]", start)
-                            saved_memory = content[start:end].strip()
-                        except ValueError:
-                            pass
-    return full_text, saved_memory
+                if 'startIndex' in elem:
+                    indices.append(elem['startIndex'])
+    return indices
 
 def generate_garbled_text():
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;':\",./<>?~`~# "
@@ -96,101 +146,126 @@ def generate_garbled_text():
     return "".join(random.choice(alphabet) for _ in range(length)) + "\n"
 
 def main():
-    if not SERVICE_ACCOUNT_JSON or not DOCUMENT_ID:
+    service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
+    document_id = os.environ.get("GOOGLE_DOC_ID")
+
+    if not service_account_json or not document_id:
         raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_KEY or GOOGLE_DOC_ID environment variables.")
 
     creds_info = service_account.Credentials.from_service_account_info(
-        eval(SERVICE_ACCOUNT_JSON),
+        eval(service_account_json),
         scopes=["https://www.googleapis.com/auth/documents"]
     )
     service = build('docs', 'v1', credentials=creds_info)
 
-    # 1. Fetch document state
-    doc = service.documents().get(documentId=DOCUMENT_ID).execute()
-    full_text, saved_memory = extract_doc_data(doc)
-    
-    body_content = doc.get('body', {}).get('content', [])
-    doc_end_index = body_content[-1].get('endIndex', 1) - 1 if body_content else 1
+    # 1. Fetch document state with tabs content enabled
+    doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
+    full_text, saved_memory, all_tabs = extract_all_docs_data(doc)
 
     # 2. Initialize and load model memory
     model = DocMarkovNeuralMemory(n_gram=2)
     if saved_memory:
         model.from_json(saved_memory)
-        print("Loaded neural memory from document bottom block.")
+        print("Loaded neural memory from document storage block.")
     else:
         print("Initializing base neural memory weights.")
         model.train("dochead initialization core online system active protocol ready")
 
-    # 3. Train on everything currently written in the document
+    # 3. Train on everything written across all tabs
     model.train(full_text)
 
-    # 4. Search for 'dochead' trigger
-    match = re.search(r'(?i)(?:[^\r\n]*\bdochead\b[^\r\n]*)', full_text)
-    
+    # 4. Search for all 'dochead' occurrences across ALL tabs
+    occurrences = find_dochead_occurrences_across_tabs(all_tabs)
     requests = []
-    top_injection_text = ""
 
-    if match:
-        context_line = match.group(0).strip()
-        context_words = context_line.split()
-        print(f"Found 'dochead' context: {context_line}")
+    if occurrences:
+        print(f"Found {len(occurrences)} 'dochead' trigger(s) across all document tabs.")
         
-        # Generate context-conditioned neural response
-        response = model.generate(seed_words=context_words, max_words=14)
-        top_injection_text = f"\n[GLITCH_BOT]: {response}\n"
+        # CRITICAL FIX: Sort in reverse order (highest index first) so index shifts don't break prior replacements
+        occurrences.sort(key=lambda x: x['start'], reverse=True)
         
-        # Replace 'dochead' with '[GLITCH_BOT]' to deactivate trigger and avoid loops
+        for item in occurrences:
+            start = item['start']
+            end = item['end']
+            context_text = item['text']
+            tab_id = item['tabId']
+            
+            context_words = context_text.split()
+            response = model.generate(seed_words=context_words, max_words=14)
+            reply_text = f"\n[GLITCH_BOT]: {response}\n"
+            
+            range_arg = {'startIndex': start, 'endIndex': end}
+            location_arg = {'index': start}
+            if tab_id:
+                range_arg['tabId'] = tab_id
+                location_arg['tabId'] = tab_id
+
+            # Cleanly replace 'dochead' range with the bot response
+            requests.append({
+                'deleteContentRange': {
+                    'range': range_arg
+                }
+            })
+            requests.append({
+                'insertText': {
+                    'location': location_arg,
+                    'text': reply_text
+                }
+            })
+    else:
+        # No triggers found: pick a random tab and a safe random index inside it
+        target_tab = random.choice(all_tabs)
+        tab_properties = target_tab.get('tabProperties', {})
+        tab_id = tab_properties.get('tabId')
+        
+        safe_indices = get_safe_insertion_points_for_tab(target_tab)
+        random_index = random.choice(safe_indices)
+        
+        glitch_text = f"\n[GLITCH_BOT]: {generate_garbled_text()}\n"
+        print(f"No triggers found. Injecting random glitch into tab '{tab_properties.get('title', 'Untitled')}' at index {random_index}.")
+        
+        location_arg = {'index': random_index}
+        if tab_id:
+            location_arg['tabId'] = tab_id
+
         requests.append({
-            'replaceAllText': {
-                'containsText': {'text': 'dochead', 'matchCase': False},
-                'replaceText': '[GLITCH_BOT]'
+            'insertText': {
+                'location': location_arg,
+                'text': glitch_text
             }
         })
-    else:
-        # Standard background mutation pulse
-        top_injection_text = f"\n[GLITCH_BOT]: {generate_garbled_text()}\n"
+        model.train(glitch_text)
 
-    # Train model on our new top injection output
-    model.train(top_injection_text)
-    
-    # 5. Insert active response at the top (index 1)
-    requests.append({
-        'insertText': {
-            'location': {'index': 1},
-            'text': top_injection_text
-        }
-    })
-    requests.append({
-        'updateTextStyle': {
-            'range': {
-                'startIndex': 1,
-                'endIndex': 1 + len(top_injection_text)
-            },
-            'textStyle': {
-                'foregroundColor': {
-                    'color': {
-                        'rgbColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}
-                    }
-                }
-            },
-            'fields': 'foregroundColor'
-        }
-    })
+    # 5. Append model memory block at the end of the first tab
+    first_tab = all_tabs[0]
+    first_tab_id = first_tab.get('tabProperties', {}).get('tabId')
+    document_tab = first_tab.get('documentTab', {})
+    body_content = document_tab.get('body', {}).get('content', [])
+    doc_end_index = body_content[-1].get('endIndex', 1) - 1 if body_content else 1
 
-    # 6. Append updated neural memory block at the bottom of the document
     bottom_memory_block = f"\n[MODEL_MEMORY: {model.to_json()}]\n"
+    
+    end_location_arg = {'index': doc_end_index}
+    if first_tab_id:
+        end_location_arg['tabId'] = first_tab_id
+
     requests.append({
         'insertText': {
-            'location': {'index': doc_end_index},
+            'location': end_location_arg,
             'text': bottom_memory_block
         }
     })
+    
+    text_style_range = {
+        'startIndex': doc_end_index,
+        'endIndex': doc_end_index + len(bottom_memory_block)
+    }
+    if first_tab_id:
+        text_style_range['tabId'] = first_tab_id
+
     requests.append({
         'updateTextStyle': {
-            'range': {
-                'startIndex': doc_end_index,
-                'endIndex': doc_end_index + len(bottom_memory_block)
-            },
+            'range': text_style_range,
             'textStyle': {
                 'foregroundColor': {
                     'color': {
@@ -203,9 +278,9 @@ def main():
     })
 
     result = service.documents().batchUpdate(
-        documentId=DOCUMENT_ID, body={'requests': requests}
+        documentId=document_id, body={'requests': requests}
     ).execute()
-    print(f"Self-evolving neural cycle executed! Response at top, memory stored at bottom. Reply: {result}")
+    print(f"Document updated successfully across tabs! Reply: {result}")
 
 if __name__ == '__main__':
     main()
