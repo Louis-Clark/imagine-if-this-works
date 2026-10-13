@@ -7,11 +7,25 @@ from googleapiclient.discovery import build
 SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
 DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
+# A pool of sample public images for random insertion
+SAMPLE_IMAGES = [
+    "https://upload.wikimedia.org/wikipedia/commons/3/3f/Placeholder_view_vector.svg",
+    "https://upload.wikimedia.org/wikipedia/commons/8/84/Example.svg",
+    "https://upload.wikimedia.org/wikipedia/commons/2/25/Icon-round-Question_mark.svg"
+]
+
 def generate_garbled_text():
-    # Mix of letters, numbers, and wild symbols
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;':\",./<>?~`~# "
     length = random.randint(20, 50)
     return "".join(random.choice(alphabet) for _ in range(length)) + "\n"
+
+def get_document_length(service, document_id):
+    doc = service.documents().get(documentId=document_id).execute()
+    # Find the end index of the document body contents
+    body_content = doc.get('body', {}).get('content', [])
+    if body_content:
+        return body_content[-1].get('endIndex', 1) - 1
+    return 1
 
 def main():
     if not SERVICE_ACCOUNT_JSON or not DOCUMENT_ID:
@@ -23,11 +37,13 @@ def main():
     )
     service = build('docs', 'v1', credentials=creds_info)
 
-    garbled_text = f"[GLITCH_BOT]: {generate_garbled_text()}"
-    insert_index = 1
+    # Fetch max length to pick a random insert index inside the document
+    max_len = get_document_length(service, DOCUMENT_ID)
+    insert_index = random.randint(1, max(1, max_len - 1))
 
-    # 1. Insert the garbled text at the top
-    # 2. Update the text style to explicitly force white color
+    garbled_text = f"\n[GLITCH_BOT @ {insert_index}]: {generate_garbled_text()}"
+    random_image_url = random.choice(SAMPLE_IMAGES)
+
     requests = [
         {
             'insertText': {
@@ -56,13 +72,25 @@ def main():
                 },
                 'fields': 'foregroundColor'
             }
+        },
+        {
+            'insertInlineImage': {
+                'uri': random_image_url,
+                'location': {
+                    'index': insert_index + len(garbled_text)
+                },
+                'objectSize': {
+                    'height': {'magnitude': 100, 'unit': 'PT'},
+                    'width': {'magnitude': 100, 'unit': 'PT'}
+                }
+            }
         }
     ]
 
     result = service.documents().batchUpdate(
         documentId=DOCUMENT_ID, body={'requests': requests}
     ).execute()
-    print(f"Successfully injected white garbled text! Reply: {result}")
+    print(f"Successfully injected text and image at index {insert_index}! Reply: {result}")
 
 if __name__ == '__main__':
     main()
