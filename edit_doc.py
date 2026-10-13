@@ -10,7 +10,7 @@ SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
 DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
 class DocMarkovNeuralMemory:
-    def __init__(self, n_gram=2, max_keys=250):
+    def __init__(self, n_gram=2, max_keys=5000):
         self.n_gram = n_gram
         self.max_keys = max_keys
         self.weights = {}
