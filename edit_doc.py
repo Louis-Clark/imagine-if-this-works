@@ -13,7 +13,7 @@ DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
 
 class DocMarkovNeuralMemory:
-    def __init__(self, n_gram=2, max_keys=250, max_vocab=200):
+    def __init__(self, n_gram=2, max_keys=5000, max_vocab=400):
         self.n_gram = n_gram
         self.max_keys = max_keys
         self.max_vocab = max_vocab
