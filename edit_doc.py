@@ -20,6 +20,13 @@ DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
 VEC_DIM = 64
 
+DEBUG = True
+
+def dbg(*args):
+    if DEBUG:
+        print("[DEBUG]", *args)
+
+
 # ---------- tiny vector math (works with or without numpy) ----------
 def _as_list(v):
     if isinstance(v, list):
@@ -39,7 +46,6 @@ def _norm(a):
         if n <= 0:
             return [0.0] * len(a) if a else [0.0]
         return [x / n for x in a]
-    # numpy array
     n = float(np.linalg.norm(a))
     return a / n if n > 0 else a
 
@@ -65,7 +71,6 @@ def _zeros(d=VEC_DIM):
     return [0.0] * d
 
 def _hash_vector(word, dim=VEC_DIM):
-    """Deterministic fallback when numpy is unavailable or word is unseen."""
     h = hashlib.sha256(word.encode()).digest()
     vec = [((h[i % len(h)] / 255.0) - 0.5) for i in range(dim)]
     return _norm(vec)
@@ -92,12 +97,16 @@ class Encoder:
         self.directions = {}
 
     def fit(self, text):
+        dbg(f"Encoder.fit: input length = {len(text)} chars")
         words = [w.strip(string.punctuation).lower() for w in text.split()]
         words = [w for w in words if len(w) >= 3]
+        dbg(f"Encoder.fit: {len(words)} candidate words")
         counts = Counter(words)
         vocab_words = [w for w, c in counts.most_common() if c >= self.min_count]
+        dbg(f"Encoder.fit: {len(vocab_words)} vocab words above min_count={self.min_count}")
 
         if not vocab_words:
+            dbg("Encoder.fit: NO VOCAB — aborting (doc too small or min_count too high)")
             return
 
         self.vocab = {w: i for i, w in enumerate(vocab_words)}
@@ -119,7 +128,9 @@ class Encoder:
                 cj = self.vocab[ctx]
                 co[(wi, cj)] += 1.0
 
+        dbg(f"Encoder.fit: {len(co)} co-occurrence pairs")
         if not co:
+            dbg("Encoder.fit: NO CO-OCCURRENCE — aborting")
             return
 
         total = sum(co.values())
@@ -141,13 +152,18 @@ class Encoder:
                 if emb.shape[1] < self.dim:
                     pad = np.zeros((emb.shape[0], self.dim - emb.shape[1]))
                     emb = np.hstack([emb, pad])
-            except Exception:
+                dbg(f"Encoder.fit: SVD OK, shape={emb.shape}")
+            except Exception as e:
+                dbg(f"Encoder.fit: SVD FAILED ({e}), using random")
                 emb = np.random.randn(V, self.dim) * 0.1
             for w, i in self.vocab.items():
                 self.vectors[w] = _norm(emb[i])
         else:
+            dbg("Encoder.fit: numpy NOT available, using hash fallback")
             for w in self.vocab:
                 self.vectors[w] = _hash_vector(w, self.dim)
+
+        dbg(f"Encoder.fit: built {len(self.vectors)} word vectors")
 
     def embed_word(self, w):
         w = w.strip(string.punctuation).lower()
@@ -186,6 +202,7 @@ class Encoder:
         }
         for name, text in seeds.items():
             self.directions[name] = self.embed(text)
+        dbg(f"Encoder.build_directions: {len(self.directions)} directions built")
 
     def project(self, vec, direction_name):
         d = self.directions.get(direction_name)
@@ -198,11 +215,12 @@ def cosine(a, b):
     return _dot(_norm(a), _norm(b))
 
 
-# ---------- serialization helpers for editable blocks ----------
+# ---------- serialization helpers ----------
 def parse_vectors_block(text):
     vectors = {}
     m = re.search(r'=== VECTORS ===(.*?)=== END VECTORS ===', text, re.DOTALL)
     if not m:
+        dbg("parse_vectors_block: no VECTORS block found")
         return vectors
     for line in m.group(1).splitlines():
         line = line.strip()
@@ -217,6 +235,7 @@ def parse_vectors_block(text):
                 vectors[name.strip()] = _from_list(nums[:VEC_DIM])
         except Exception:
             continue
+    dbg(f"parse_vectors_block: {len(vectors)} vectors loaded")
     return vectors
 
 
@@ -234,6 +253,7 @@ def parse_facts_block(text):
     facts = {}
     m = re.search(r'=== FACTS ===(.*?)=== END FACTS ===', text, re.DOTALL)
     if not m:
+        dbg("parse_facts_block: no FACTS block")
         return facts
     for line in m.group(1).splitlines():
         line = line.strip()
@@ -244,6 +264,7 @@ def parse_facts_block(text):
             facts[body.strip()] = float(weight.strip())
         except Exception:
             continue
+    dbg(f"parse_facts_block: {len(facts)} facts loaded")
     return facts
 
 
@@ -259,6 +280,7 @@ def parse_influences_block(text):
     influences = {"ppm": 0.40, "embedding": 0.25, "retrieval": 0.20, "facts": 0.10, "self": 0.05}
     m = re.search(r'=== INFLUENCES ===(.*?)=== END INFLUENCES ===', text, re.DOTALL)
     if not m:
+        dbg("parse_influences_block: no INFLUENCES block, using defaults")
         return influences
     for line in m.group(1).splitlines():
         line = line.strip()
@@ -269,6 +291,7 @@ def parse_influences_block(text):
             influences[k.strip()] = float(v.strip())
         except Exception:
             continue
+    dbg(f"parse_influences_block: {influences}")
     return influences
 
 
@@ -284,6 +307,7 @@ def parse_mood_block(text):
     mood = {"valence": 0.0, "arousal": 0.5, "coherence": 0.5, "novelty": 0.5}
     m = re.search(r'=== MOOD ===(.*?)=== END MOOD ===', text, re.DOTALL)
     if not m:
+        dbg("parse_mood_block: no MOOD block, using defaults")
         return mood
     for line in m.group(1).splitlines():
         line = line.strip()
@@ -299,6 +323,7 @@ def parse_mood_block(text):
                 mood[k.strip()] = float(v.strip())
             except Exception:
                 pass
+    dbg(f"parse_mood_block: {mood}")
     return mood
 
 
@@ -314,6 +339,7 @@ def parse_effects_block(text):
     effects = {}
     m = re.search(r'=== EFFECTS ===(.*?)=== END EFFECTS ===', text, re.DOTALL)
     if not m:
+        dbg("parse_effects_block: no EFFECTS block")
         return effects
     for line in m.group(1).splitlines():
         line = line.strip()
@@ -323,6 +349,7 @@ def parse_effects_block(text):
                 effects[k.strip()] = float(v.strip())
             except Exception:
                 pass
+    dbg(f"parse_effects_block: {len(effects)} effects")
     return effects
 
 
@@ -338,6 +365,7 @@ def parse_exchanges_block(text):
     exchanges = []
     m = re.search(r'=== EXCHANGES ===(.*?)=== END EXCHANGES ===', text, re.DOTALL)
     if not m:
+        dbg("parse_exchanges_block: no EXCHANGES block")
         return exchanges
     for line in m.group(1).splitlines():
         line = line.strip()
@@ -352,6 +380,7 @@ def parse_exchanges_block(text):
             exchanges.append({"tick": tick, "vec": vec, "raw": line})
         except Exception:
             continue
+    dbg(f"parse_exchanges_block: {len(exchanges)} exchanges")
     return exchanges
 
 
@@ -364,7 +393,7 @@ def render_exchanges_block(exchanges, new_entry=None, max_lines=300):
     return "\n".join(lines)
 
 
-# ---------- model class (markov decoder) ----------
+# ---------- model class ----------
 class DocMarkovNeuralMemory:
     def __init__(self, n_gram=2, max_keys=3000, max_vocab=400, max_phrases=300):
         self.n_gram = n_gram
@@ -411,7 +440,9 @@ class DocMarkovNeuralMemory:
 
     def train(self, text, is_self=False):
         words = text.split()
+        dbg(f"train(is_self={is_self}): {len(words)} words, {len(text)} chars")
         if len(words) < 3:
+            dbg("train: too few words, skipping")
             return
         for i in range(len(words) - 2):
             gram = tuple(words[i:i + 2])
@@ -455,6 +486,7 @@ class DocMarkovNeuralMemory:
             budget = max(0, self.max_vocab - len(named))
             top_others = dict(sorted(others.items(), key=lambda kv: kv[1]["c"], reverse=True)[:budget])
             self.vocab = {**named, **top_others}
+        dbg(f"train: now w={len(self.weights)} tri={len(self.tri)} phrases={len(self.phrases)} vocab={len(self.vocab)}")
 
     def find_nameable_tokens(self, min_self=3, ratio=2.5):
         candidates = []
@@ -468,6 +500,7 @@ class DocMarkovNeuralMemory:
             if self_c / book_c >= ratio:
                 candidates.append((tok, self_c, book_c))
         candidates.sort(key=lambda x: x[1] / x[2], reverse=True)
+        dbg(f"find_nameable_tokens: {len(candidates)} candidates")
         return candidates[:3]
 
     def promote_to_name(self, token):
@@ -477,9 +510,11 @@ class DocMarkovNeuralMemory:
         entry["named"] = True
         entry["f"] = self.tick
         self.weights.setdefault(f"[NEW]{token}", {})[f"[NEW]{token}"] = 1.0
+        dbg(f"promote_to_name: {token} -> [NEW]{token}")
         return True
 
     def update_mood(self, last_output, had_trigger):
+        old_mood = self.mood
         if last_output:
             toks = last_output.split()
             if len(toks) > 1:
@@ -490,6 +525,7 @@ class DocMarkovNeuralMemory:
         if not had_trigger:
             self.mood += 0.02
         self.mood = max(0.05, min(0.95, self.mood))
+        dbg(f"update_mood: {old_mood:.3f} -> {self.mood:.3f}")
 
     def _sample_next(self, key, table, temperature):
         targets = table.get(key)
@@ -517,6 +553,16 @@ class DocMarkovNeuralMemory:
             return False
         if toks[-1].lower() in {"the", "a", "an", "of", "to", "and", "or", "but", "in", "on", "with", "for"}:
             return False
+        code_markers = [
+            '(', ')', '{', '}', '==', 'self.', '.get(', 'def ', 'for ',
+            'if ', 'return ', 'import ', 'class ', 'tab.', '_tab', 'all_tabs',
+            'document_tab', 'first_tab', 'body_content',
+        ]
+        hits = sum(1 for m in code_markers if m in text)
+        if hits >= 2:
+            return False
+        if text.count('_') >= 3:
+            return False
         return True
 
     def _shape(self, text):
@@ -531,6 +577,7 @@ class DocMarkovNeuralMemory:
 
     def generate(self, seed_words=None, max_words=14, context_words=None):
         if not self.weights:
+            dbg("generate: no weights, returning tabula rasa")
             return "system_matrix_tabula_rasa_online..."
         temperature = 0.5 + self.mood * 1.2
         if self.phrases and random.random() < self.mood * 0.25:
@@ -565,9 +612,11 @@ class DocMarkovNeuralMemory:
 
     def generate_with_veto(self, seed_words=None, max_words=14, context_words=None, attempts=4):
         best = None
-        for _ in range(attempts):
+        for attempt in range(attempts):
             out = self.generate(seed_words=seed_words, max_words=max_words, context_words=context_words)
-            if self._looks_acceptable(out):
+            ok = self._looks_acceptable(out)
+            dbg(f"generate_with_veto attempt {attempt+1}: accepted={ok} len={len(out)}")
+            if ok:
                 return out
             if best is None or len(out) > len(best):
                 best = out
@@ -605,16 +654,27 @@ def get_all_tabs(doc):
 def extract_all_docs_data(doc):
     full_text = ""
     all_tabs = get_all_tabs(doc)
+    dbg(f"extract_all_docs_data: {len(all_tabs)} tabs")
     for tab in all_tabs:
+        title = tab.get('tabProperties', {}).get('title', '?')
+        tab_id = tab.get('tabProperties', {}).get('tabId', '?')
+        dbg(f"  tab: title={title!r} id={tab_id}")
+        if title.upper() in {'SOURCE', 'CODE', 'SCRIPT'}:
+            dbg(f"    SKIPPED (title filter)")
+            continue
         body = tab.get('documentTab', {}).get('body', {}).get('content', [])
+        dbg(f"    body elements: {len(body)}")
         for element in body:
             if 'paragraph' in element:
                 for elem in element['paragraph'].get('elements', []):
                     if 'textRun' in elem:
                         full_text += elem['textRun'].get('content', '') + "\n"
+    dbg(f"extract_all_docs_data: full_text len={len(full_text)}")
+    dbg(f"extract_all_docs_data: preview={full_text[:200]!r}")
     match = re.search(r'\[MODEL_MEMORY:\s*(\{.*?\})\s*\]', full_text)
     saved_memory = match.group(1) if match else None
     full_memory_string = match.group(0) if match else None
+    dbg(f"extract_all_docs_data: memory found={saved_memory is not None}")
     return full_text, saved_memory, full_memory_string, all_tabs
 
 
@@ -640,7 +700,24 @@ def extract_question(text, trigger_match):
     tail = text[trigger_match.end():trigger_match.end() + 400]
     tail = re.sub(r'^\s*[:\-\u2014]\s*', '', tail)
     m = re.match(r'([^.?!]{3,200}[.?!]?)', tail.strip())
-    return m.group(1).strip() if m else ""
+    if not m:
+        return ""
+    q = m.group(1).strip()
+
+    code_markers = ['(', ')', '{', '}', '==', 'self.', '.get(', 'def ',
+                    'for ', 'if ', 'return ', 'import ', 'class ']
+    if sum(1 for m in code_markers if m in q) >= 2:
+        dbg(f"extract_question: rejected (code markers): {q[:80]!r}")
+        return ""
+    if q.count('_') >= 3:
+        dbg(f"extract_question: rejected (too many underscores): {q[:80]!r}")
+        return ""
+    if len(q.split()) < 2:
+        dbg(f"extract_question: rejected (too short): {q[:80]!r}")
+        return ""
+
+    dbg(f"extract_question: accepted: {q[:80]!r}")
+    return q
 
 
 def classify_question(encoder, q_text):
@@ -649,6 +726,7 @@ def classify_question(encoder, q_text):
     q_type = max(scores, key=scores.get)
     register_scores = {name: encoder.project(qv, name) for name in ("cold", "warm", "urgent", "calm")}
     register = max(register_scores, key=register_scores.get)
+    dbg(f"classify_question: type={q_type} (scores={ {k: round(v,3) for k,v in scores.items()} }) register={register}")
     return q_type, register, qv, scores
 
 
@@ -660,6 +738,7 @@ def nearest_subject(encoder, q_vec, vectors, k=1):
         sim = cosine(q_vec, vec)
         best.append((sim, name))
     best.sort(reverse=True)
+    dbg(f"nearest_subject: top {k} = {[(round(s,3), n) for s, n in best[:k]]}")
     return best[:k]
 
 
@@ -684,7 +763,9 @@ def decode_blend_to_seed_words(encoder, blend, vectors, max_words=3):
             sim = cosine(blend, vec)
             best.append((sim, name[5:]))
     best.sort(reverse=True)
-    return [w for _, w in best[:max_words]]
+    result = [w for _, w in best[:max_words]]
+    dbg(f"decode_blend_to_seed_words: {result} (from {len(best)} candidates)")
+    return result
 
 
 def extract_facts_from_reply(reply_text):
@@ -705,24 +786,34 @@ def extract_facts_from_reply(reply_text):
                     facts.append(f"{subj} has {pred}")
                 else:
                     facts.append(f"{subj} was {pred}")
+    dbg(f"extract_facts_from_reply: {len(facts)} facts from reply")
     return facts[:3]
 
 
 def main():
+    dbg("=" * 60)
+    dbg("MAIN START")
+    dbg("=" * 60)
+
     service_account_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
     document_id = os.environ.get("GOOGLE_DOC_ID")
     if not service_account_json or not document_id:
         raise ValueError("Missing GOOGLE_SERVICE_ACCOUNT_KEY or GOOGLE_DOC_ID env vars.")
+    dbg(f"document_id = {document_id}")
 
     creds_info = service_account.Credentials.from_service_account_info(
         eval(service_account_json),
         scopes=["https://www.googleapis.com/auth/documents"]
     )
     service = build('docs', 'v1', credentials=creds_info)
+    dbg("service built OK")
 
     doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
+    dbg(f"doc fetched, revisionId={doc.get('revisionId', '?')}")
+
     full_text, saved_memory, full_memory_string, all_tabs = extract_all_docs_data(doc)
 
+    dbg("--- parsing blocks ---")
     vectors = parse_vectors_block(full_text)
     facts = parse_facts_block(full_text)
     influences = parse_influences_block(full_text)
@@ -730,27 +821,36 @@ def main():
     exchanges = parse_exchanges_block(full_text)
     effects = parse_effects_block(full_text)
 
+    dbg("--- model ---")
     model = DocMarkovNeuralMemory(n_gram=2, max_keys=3000, max_vocab=400, max_phrases=300)
     if saved_memory:
         model.from_json(saved_memory)
-        print(f"Loaded memory. tick={model.tick} mood={model.mood:.2f}")
+        dbg(f"loaded model: tick={model.tick} mood={model.mood:.2f} w={len(model.weights)}")
     else:
+        dbg("cold start, training on seed string")
         model.train("dochead initialization core online system active protocol ready")
 
+    dbg("--- encoder ---")
     encoder = Encoder(dim=VEC_DIM, window=4, min_count=2)
     encoder.fit(full_text)
     encoder.build_directions()
 
+    dbg(f"--- merging {len(encoder.vectors)} new word vectors into doc vectors ({len(vectors)} existing) ---")
+    added_words = 0
     for w, vec in encoder.vectors.items():
         key = f"word:{w}"
         if key not in vectors:
             vectors[key] = vec
+            added_words += 1
+    dbg(f"added {added_words} new word vectors, total = {len(vectors)}")
 
     for fact_text in list(facts.keys()):
         key = f"fact:{fact_text}"
         if key not in vectors:
             vectors[key] = encoder.embed(fact_text)
+    dbg(f"after adding fact vectors: {len(vectors)} total vectors")
 
+    dbg("--- training on full text ---")
     model.train(full_text, is_self=False)
 
     requests = []
@@ -760,6 +860,7 @@ def main():
     new_exchange_raw = None
 
     trigger_match = re.search(r'\bdochead\b', full_text, re.IGNORECASE)
+    dbg(f"trigger_match: {trigger_match is not None}")
 
     if trigger_match:
         had_trigger = True
@@ -771,6 +872,7 @@ def main():
             subject_hits = nearest_subject(encoder, q_vec, vectors, k=1)
             subject_name = subject_hits[0][1] if subject_hits else None
             subject_vec = vectors.get(subject_name) if subject_name else _zeros()
+            dbg(f"subject: {subject_name} (sim={subject_hits[0][0]:.3f})" if subject_hits else "subject: NONE")
 
             novelty = 0.7
             retrieved = []
@@ -779,8 +881,10 @@ def main():
                 scored.sort(reverse=True, key=lambda x: x[0])
                 retrieved = [e for sim, e in scored[:2] if sim > 0.3]
                 novelty = 1.0 - max((sim for sim, _ in scored[:1]), default=0.0)
+            dbg(f"novelty={novelty:.3f} retrieved={len(retrieved)}")
 
             relevant_facts = [(f, w) for f, w in facts.items() if subject_name and subject_name[5:] in f.lower()][:3]
+            dbg(f"relevant_facts: {len(relevant_facts)}")
 
             blend_items = [
                 (q_vec, 1.0),
@@ -792,6 +896,7 @@ def main():
                 fact_vec = vectors.get(f"fact:{fact_text}")
                 if fact_vec is not None:
                     blend_items.append((fact_vec, influences["facts"] * weight))
+            dbg(f"blend_items: {len(blend_items)} vectors")
 
             blend = blend_vectors(blend_items)
 
@@ -808,16 +913,19 @@ def main():
 
             response = model.generate_with_veto(context_words=seed_words, max_words=max_words)
             if not response:
+                dbg("generate returned empty, falling back to non-veto generate")
                 response = model.generate(max_words=max_words)
 
             print(f"  type={q_type} register={q_register} novelty={novelty:.2f} seed={seed_words}")
         else:
+            dbg("trigger but no question, using fallback context")
             response = model.generate_with_veto(
                 context_words=words_around_trigger(full_text, "dochead", window=10),
                 max_words=14
             )
             q_vec = encoder.embed("")
 
+        dbg(f"response = {response[:100]!r}")
         last_output = response
         reply_text = f"[GLITCH_BOT]: {response}"
 
@@ -835,7 +943,9 @@ def main():
                 f"{model.tick} | " + " ".join(f"{x:.3f}" for x in _to_list(exch_vec)) +
                 f" | {question[:60]!r} | {response[:60]!r}"
             )
-        except Exception:
+            dbg(f"exchange recorded: {new_exchange_raw[:80]!r}")
+        except Exception as e:
+            dbg(f"exchange FAILED: {e}")
             new_exchange_raw = None
 
         for f in extract_facts_from_reply(response):
@@ -843,9 +953,10 @@ def main():
             fk = f"fact:{f}"
             if fk not in vectors:
                 vectors[fk] = encoder.embed(f)
+        dbg(f"facts now: {len(facts)}")
 
     else:
-        print("No trigger. Autonomous spout.")
+        dbg("no trigger, autonomous spout")
         if len(model.weights) > 0:
             spout_content = model.generate_with_veto(max_words=12)
             if not spout_content:
@@ -854,6 +965,7 @@ def main():
             spout_content = generate_garbled_text()
         last_output = spout_content
         reply_text = f"\n[GLITCH_BOT (Autonomous Spout)]: {spout_content}\n"
+        dbg(f"spout = {spout_content[:100]!r}")
 
         if full_memory_string:
             placeholder = "[MODEL_MEMORY_PENDING]"
@@ -864,11 +976,14 @@ def main():
                 }
             })
             full_memory_string = placeholder
+            dbg("queued: replace memory with spout + placeholder")
         else:
             raise ValueError("No [MODEL_MEMORY: {...}] block found. Add one at the bottom of tab 1.")
 
+    dbg(f"self-training on reply")
     model.train(reply_text, is_self=True)
 
+    dbg("naming check")
     for tok, self_c, book_c in model.find_nameable_tokens():
         if model.promote_to_name(tok):
             named_this_tick.append(tok)
@@ -882,6 +997,7 @@ def main():
                     }
                 })
                 reply_text = new_reply
+    dbg(f"named this tick: {named_this_tick}")
 
     model.update_mood(last_output, had_trigger)
     model.tick += 1
@@ -893,6 +1009,7 @@ def main():
             mood["novelty"] = min(0.95, max(0.05, mood.get("novelty", 0.5) + (0.6 - uniq) * 0.1))
         mood["coherence"] = min(0.95, max(0.05, 0.5 + (model.mood - 0.5) * 0.8))
     mood["arousal"] = min(0.95, max(0.05, mood.get("arousal", 0.5) + (0.02 if not had_trigger else -0.01)))
+    dbg(f"mood vector: {mood}")
 
     effects_delta = {}
     if had_trigger and new_exchange_raw:
@@ -903,18 +1020,24 @@ def main():
         mood["novelty"] = min(0.95, mood["novelty"] + 0.02)
     for k, v in effects_delta.items():
         effects[f"tick_{model.tick}_{k}"] = v
+    dbg(f"effects delta: {effects_delta}")
 
     for f in list(facts.keys()):
         facts[f] *= 0.995
         if facts[f] < 0.05:
             del facts[f]
 
+    dbg("--- rendering blocks ---")
     new_vectors_block = render_vectors_block(vectors, max_lines=600)
     new_facts_block = render_facts_block(facts)
     new_influences_block = render_influences_block(influences)
     new_mood_block = render_mood_block(mood)
     new_effects_block = render_effects_block(effects)
     new_exchanges_block = render_exchanges_block(exchanges, new_entry={"raw": new_exchange_raw} if new_exchange_raw else None)
+
+    dbg(f"new vectors block: {len(new_vectors_block)} chars, {len(vectors)} vectors")
+    dbg(f"new facts block: {len(new_facts_block)} chars")
+    dbg(f"new exchanges block: {len(new_exchanges_block)} chars")
 
     for old_header, new_block in [
         ("=== VECTORS ===", new_vectors_block),
@@ -928,13 +1051,16 @@ def main():
         pattern = re.compile(re.escape(old_header) + r'.*?=== END ' + re.escape(tag) + r' ===', re.DOTALL)
         m = pattern.search(full_text)
         if m:
+            matched_text = m.group(0)
+            dbg(f"block {tag}: found, len={len(matched_text)}, queuing replace")
             requests.append({
                 'replaceAllText': {
-                    'containsText': {'text': m.group(0), 'matchCase': True},
+                    'containsText': {'text': matched_text, 'matchCase': True},
                     'replaceText': new_block
                 }
             })
         else:
+            dbg(f"block {tag}: NOT FOUND, queuing append")
             anchor = full_memory_string or '[MODEL_MEMORY:'
             requests.append({
                 'replaceAllText': {
@@ -944,6 +1070,7 @@ def main():
             })
 
     new_memory_block = f"[MODEL_MEMORY: {model.to_json()}]"
+    dbg(f"new memory block: {len(new_memory_block)} chars, w={len(model.weights)} tri={len(model.tri)}")
     if full_memory_string:
         requests.append({
             'replaceAllText': {
@@ -951,13 +1078,25 @@ def main():
                 'replaceText': new_memory_block
             }
         })
+        dbg(f"queued: replace memory block (match len={len(full_memory_string)})")
+
+    dbg(f"--- TOTAL REQUESTS: {len(requests)} ---")
+    for i, r in enumerate(requests):
+        if 'replaceAllText' in r:
+            c = r['replaceAllText']['containsText']['text']
+            dbg(f"  req[{i}]: match_len={len(c)} preview={c[:50]!r}")
+        else:
+            dbg(f"  req[{i}]: {list(r.keys())}")
 
     if requests:
+        dbg("executing batchUpdate...")
         result = service.documents().batchUpdate(
             documentId=document_id, body={'requests': requests}
         ).execute()
+        dbg(f"batchUpdate OK, new revisionId={result.get('documentId', '?')} replies={len(result.get('replies', []))}")
         print(f"Updated. tick={model.tick} mood={model.mood:.2f} named={named_this_tick}")
     else:
+        dbg("NO REQUESTS — nothing to do")
         print("No updates.")
 
 
