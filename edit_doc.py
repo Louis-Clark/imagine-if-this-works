@@ -21,39 +21,57 @@ DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 VEC_DIM = 64
 
 # ---------- tiny vector math (works with or without numpy) ----------
+def _as_list(v):
+    if isinstance(v, list):
+        return v
+    return list(v)
+
 def _dot(a, b):
     if HAS_NUMPY:
-        return float(np.dot(a, b))
+        a_ = np.asarray(a, dtype=float)
+        b_ = np.asarray(b, dtype=float)
+        return float(np.dot(a_, b_))
     return sum(x * y for x, y in zip(a, b))
 
 def _norm(a):
-    if HAS_NUMPY:
-        n = float(np.linalg.norm(a))
-        return a / n if n > 0 else a
-    n = math.sqrt(sum(x * x for x in a))
-    return [x / n if n > 0 else 0.0 for x in a] if n > 0 else a
+    if isinstance(a, list):
+        n = math.sqrt(sum(x * x for x in a))
+        if n <= 0:
+            return [0.0] * len(a) if a else [0.0]
+        return [x / n for x in a]
+    # numpy array
+    n = float(np.linalg.norm(a))
+    return a / n if n > 0 else a
 
 def _add(a, b, w=1.0):
-    if HAS_NUMPY:
-        return a + b * w
-    return [x + y * w for x, y in zip(a, b)]
+    a_is_list = isinstance(a, list)
+    b_is_list = isinstance(b, list)
+    if a_is_list and not b_is_list:
+        b = list(b)
+    elif not a_is_list and b_is_list:
+        a = list(a)
+    if a_is_list:
+        return [x + y * w for x, y in zip(a, b)]
+    return a + b * w
 
 def _scale(a, s):
-    if HAS_NUMPY:
-        return a * s
-    return [x * s for x in a]
+    if isinstance(a, list):
+        return [x * s for x in a]
+    return a * s
 
 def _zeros(d=VEC_DIM):
-    return np.zeros(d) if HAS_NUMPY else [0.0] * d
+    if HAS_NUMPY:
+        return np.zeros(d)
+    return [0.0] * d
 
 def _hash_vector(word, dim=VEC_DIM):
-    """Deterministic fallback when numpy is unavailable."""
+    """Deterministic fallback when numpy is unavailable or word is unseen."""
     h = hashlib.sha256(word.encode()).digest()
     vec = [((h[i % len(h)] / 255.0) - 0.5) for i in range(dim)]
     return _norm(vec)
 
 def _to_list(v):
-    if HAS_NUMPY:
+    if HAS_NUMPY and isinstance(v, np.ndarray):
         return [round(float(x), 4) for x in v]
     return [round(float(x), 4) for x in v]
 
@@ -62,15 +80,16 @@ def _from_list(lst):
         return np.array(lst, dtype=float)
     return list(lst)
 
+
 # ---------- PPMI-SVD encoder ----------
 class Encoder:
     def __init__(self, dim=VEC_DIM, window=4, min_count=2):
         self.dim = dim
         self.window = window
         self.min_count = min_count
-        self.vocab = {}          # word -> index
-        self.vectors = {}        # word -> vector
-        self.directions = {}     # name -> vector
+        self.vocab = {}
+        self.vectors = {}
+        self.directions = {}
 
     def fit(self, text):
         words = [w.strip(string.punctuation).lower() for w in text.split()]
@@ -84,7 +103,6 @@ class Encoder:
         self.vocab = {w: i for i, w in enumerate(vocab_words)}
         V = len(vocab_words)
 
-        # co-occurrence
         co = defaultdict(float)
         for i, w in enumerate(words):
             if w not in self.vocab:
@@ -104,7 +122,6 @@ class Encoder:
         if not co:
             return
 
-        # PPMI
         total = sum(co.values())
         row_sums = defaultdict(float)
         col_sums = defaultdict(float)
@@ -129,7 +146,6 @@ class Encoder:
             for w, i in self.vocab.items():
                 self.vectors[w] = _norm(emb[i])
         else:
-            # fallback: hash-based vectors, no semantics but runs
             for w in self.vocab:
                 self.vectors[w] = _hash_vector(w, self.dim)
 
@@ -137,7 +153,10 @@ class Encoder:
         w = w.strip(string.punctuation).lower()
         if w in self.vectors:
             return self.vectors[w]
-        return _hash_vector(w, self.dim)
+        hv = _hash_vector(w, self.dim)
+        if HAS_NUMPY:
+            return np.array(hv, dtype=float)
+        return hv
 
     def embed(self, text):
         toks = [t.strip(string.punctuation).lower() for t in text.split()]
@@ -146,7 +165,7 @@ class Encoder:
             return _zeros()
         vecs = [self.embed_word(t) for t in toks]
         if HAS_NUMPY:
-            return _norm(np.mean(vecs, axis=0))
+            return _norm(np.mean(np.stack([np.asarray(v, dtype=float) for v in vecs]), axis=0))
         total = [0.0] * self.dim
         for v in vecs:
             for i in range(self.dim):
@@ -181,7 +200,6 @@ def cosine(a, b):
 
 # ---------- serialization helpers for editable blocks ----------
 def parse_vectors_block(text):
-    """Parse === VECTORS === lines: name | x y z ..."""
     vectors = {}
     m = re.search(r'=== VECTORS ===(.*?)=== END VECTORS ===', text, re.DOTALL)
     if not m:
@@ -194,7 +212,9 @@ def parse_vectors_block(text):
             name, rest = line.split('|', 1)
             nums = [float(x) for x in rest.split() if x.strip()]
             if nums:
-                vectors[name.strip()] = _from_list(nums[:VEC_DIM] if len(nums) >= VEC_DIM else nums + [0.0] * (VEC_DIM - len(nums)))
+                if len(nums) < VEC_DIM:
+                    nums = nums + [0.0] * (VEC_DIM - len(nums))
+                vectors[name.strip()] = _from_list(nums[:VEC_DIM])
         except Exception:
             continue
     return vectors
@@ -315,7 +335,6 @@ def render_effects_block(effects):
 
 
 def parse_exchanges_block(text):
-    """Parse === EXCHANGES === lines: tick | vector | 'question' | 'reply'"""
     exchanges = []
     m = re.search(r'=== EXCHANGES ===(.*?)=== END EXCHANGES ===', text, re.DOTALL)
     if not m:
@@ -345,7 +364,7 @@ def render_exchanges_block(exchanges, new_entry=None, max_lines=300):
     return "\n".join(lines)
 
 
-# ---------- model class (unchanged core, still the decoder) ----------
+# ---------- model class (markov decoder) ----------
 class DocMarkovNeuralMemory:
     def __init__(self, n_gram=2, max_keys=3000, max_vocab=400, max_phrases=300):
         self.n_gram = n_gram
@@ -616,7 +635,6 @@ def words_around_trigger(full_text, trigger, window=10):
 
 
 def extract_question(text, trigger_match):
-    """Take text after 'dochead' up to next sentence boundary."""
     if not trigger_match:
         return ""
     tail = text[trigger_match.end():trigger_match.end() + 400]
@@ -646,7 +664,6 @@ def nearest_subject(encoder, q_vec, vectors, k=1):
 
 
 def blend_vectors(items):
-    """items: list of (vec, weight). Returns normalized blend."""
     if not items:
         return _zeros()
     total_w = sum(w for _, w in items if w > 0)
@@ -661,7 +678,6 @@ def blend_vectors(items):
 
 
 def decode_blend_to_seed_words(encoder, blend, vectors, max_words=3):
-    """Turn a vector blend into a small set of seed words for the markov decoder."""
     best = []
     for name, vec in vectors.items():
         if name.startswith("word:"):
@@ -672,7 +688,6 @@ def decode_blend_to_seed_words(encoder, blend, vectors, max_words=3):
 
 
 def extract_facts_from_reply(reply_text):
-    """Very simple: subject is X, subject has X -> collect predicate phrases."""
     facts = []
     patterns = [
         r'(\b\w[\w\s]{2,20})\s+is\s+([\w\s]{2,40})',
@@ -684,9 +699,12 @@ def extract_facts_from_reply(reply_text):
             subj = m.group(1).strip()
             pred = m.group(2).strip().rstrip('.,;:')
             if 2 < len(subj) < 30 and 2 < len(pred) < 50:
-                facts.append(f"{subj} is {pred}" if ' is ' in m.group(0).lower() else
-                             f"{subj} has {pred}" if ' has ' in m.group(0).lower() else
-                             f"{subj} was {pred}")
+                if ' is ' in m.group(0).lower():
+                    facts.append(f"{subj} is {pred}")
+                elif ' has ' in m.group(0).lower():
+                    facts.append(f"{subj} has {pred}")
+                else:
+                    facts.append(f"{subj} was {pred}")
     return facts[:3]
 
 
@@ -705,7 +723,6 @@ def main():
     doc = service.documents().get(documentId=document_id, includeTabsContent=True).execute()
     full_text, saved_memory, full_memory_string, all_tabs = extract_all_docs_data(doc)
 
-    # ---- load structured blocks ----
     vectors = parse_vectors_block(full_text)
     facts = parse_facts_block(full_text)
     influences = parse_influences_block(full_text)
@@ -713,7 +730,6 @@ def main():
     exchanges = parse_exchanges_block(full_text)
     effects = parse_effects_block(full_text)
 
-    # ---- load or init markov decoder ----
     model = DocMarkovNeuralMemory(n_gram=2, max_keys=3000, max_vocab=400, max_phrases=300)
     if saved_memory:
         model.from_json(saved_memory)
@@ -721,24 +737,20 @@ def main():
     else:
         model.train("dochead initialization core online system active protocol ready")
 
-    # ---- fit encoder on doc ----
     encoder = Encoder(dim=VEC_DIM, window=4, min_count=2)
     encoder.fit(full_text)
     encoder.build_directions()
 
-    # Merge newly-learned word vectors into the stored vectors table (doc wins on conflict)
     for w, vec in encoder.vectors.items():
         key = f"word:{w}"
         if key not in vectors:
             vectors[key] = vec
 
-    # Add fact vectors
     for fact_text in list(facts.keys()):
         key = f"fact:{fact_text}"
         if key not in vectors:
             vectors[key] = encoder.embed(fact_text)
 
-    # ---- train decoder ----
     model.train(full_text, is_self=False)
 
     requests = []
@@ -749,7 +761,6 @@ def main():
 
     trigger_match = re.search(r'\bdochead\b', full_text, re.IGNORECASE)
 
-    # ---- conversational response ----
     if trigger_match:
         had_trigger = True
         question = extract_question(full_text, trigger_match)
@@ -761,7 +772,6 @@ def main():
             subject_name = subject_hits[0][1] if subject_hits else None
             subject_vec = vectors.get(subject_name) if subject_name else _zeros()
 
-            # novelty: how close is this question to a past exchange?
             novelty = 0.7
             retrieved = []
             if exchanges:
@@ -770,10 +780,8 @@ def main():
                 retrieved = [e for sim, e in scored[:2] if sim > 0.3]
                 novelty = 1.0 - max((sim for sim, _ in scored[:1]), default=0.0)
 
-            # relevant facts
             relevant_facts = [(f, w) for f, w in facts.items() if subject_name and subject_name[5:] in f.lower()][:3]
 
-            # build blend
             blend_items = [
                 (q_vec, 1.0),
                 (subject_vec, influences["embedding"] * 2.0),
@@ -787,15 +795,11 @@ def main():
 
             blend = blend_vectors(blend_items)
 
-            # apply mood vector offset
             mood_vec = blend_vectors([
-                (vectors.get("dir:warm", _zeros()),   mood.get("valence", 0)),
-                (vectors.get("dir:urgent", _zeros()), mood.get("arousal", 0)),
                 (q_vec, mood.get("novelty", 0.5) * 0.1),
             ])
             blend = _norm(_add(blend, mood_vec, 0.25))
 
-            # seed words for the markov decoder
             seed_words = decode_blend_to_seed_words(encoder, blend, vectors, max_words=3)
 
             max_words = 22 if q_type in ("why",) or '?' in question else 14
@@ -808,7 +812,6 @@ def main():
 
             print(f"  type={q_type} register={q_register} novelty={novelty:.2f} seed={seed_words}")
         else:
-            # trigger with no question text — pure continuation
             response = model.generate_with_veto(
                 context_words=words_around_trigger(full_text, "dochead", window=10),
                 max_words=14
@@ -825,7 +828,6 @@ def main():
             }
         })
 
-        # record the exchange vector for future retrieval
         try:
             r_vec = encoder.embed(response)
             exch_vec = _norm(_add(q_vec, r_vec, 1.0))
@@ -836,7 +838,6 @@ def main():
         except Exception:
             new_exchange_raw = None
 
-        # extract facts from reply
         for f in extract_facts_from_reply(response):
             facts[f] = min(1.0, facts.get(f, 0.0) + 0.3)
             fk = f"fact:{f}"
@@ -866,10 +867,8 @@ def main():
         else:
             raise ValueError("No [MODEL_MEMORY: {...}] block found. Add one at the bottom of tab 1.")
 
-    # ---- self-training ----
     model.train(reply_text, is_self=True)
 
-    # ---- naming (only in this reply) ----
     for tok, self_c, book_c in model.find_nameable_tokens():
         if model.promote_to_name(tok):
             named_this_tick.append(tok)
@@ -884,11 +883,9 @@ def main():
                 })
                 reply_text = new_reply
 
-    # ---- mood update (scalar for markov + vector for doc) ----
     model.update_mood(last_output, had_trigger)
     model.tick += 1
 
-    # update mood vector
     if last_output:
         toks = last_output.split()
         if len(toks) > 1:
@@ -897,7 +894,6 @@ def main():
         mood["coherence"] = min(0.95, max(0.05, 0.5 + (model.mood - 0.5) * 0.8))
     mood["arousal"] = min(0.95, max(0.05, mood.get("arousal", 0.5) + (0.02 if not had_trigger else -0.01)))
 
-    # ---- effects: self-modification of influences ----
     effects_delta = {}
     if had_trigger and new_exchange_raw:
         effects_delta["retrieval_weight"] = influences["retrieval"] * 0.05
@@ -908,13 +904,11 @@ def main():
     for k, v in effects_delta.items():
         effects[f"tick_{model.tick}_{k}"] = v
 
-    # ---- decay facts slightly ----
     for f in list(facts.keys()):
         facts[f] *= 0.995
         if facts[f] < 0.05:
             del facts[f]
 
-    # ---- persist all blocks ----
     new_vectors_block = render_vectors_block(vectors, max_lines=600)
     new_facts_block = render_facts_block(facts)
     new_influences_block = render_influences_block(influences)
@@ -922,7 +916,6 @@ def main():
     new_effects_block = render_effects_block(effects)
     new_exchanges_block = render_exchanges_block(exchanges, new_entry={"raw": new_exchange_raw} if new_exchange_raw else None)
 
-    # replace each block in the doc; if a block doesn't exist, append it
     for old_header, new_block in [
         ("=== VECTORS ===", new_vectors_block),
         ("=== FACTS ===", new_facts_block),
@@ -931,7 +924,8 @@ def main():
         ("=== EFFECTS ===", new_effects_block),
         ("=== EXCHANGES ===", new_exchanges_block),
     ]:
-        pattern = re.compile(re.escape(old_header) + r'.*?=== END ' + old_header.strip('= ').strip() + r' ===', re.DOTALL)
+        tag = old_header.strip('= ').strip()
+        pattern = re.compile(re.escape(old_header) + r'.*?=== END ' + re.escape(tag) + r' ===', re.DOTALL)
         m = pattern.search(full_text)
         if m:
             requests.append({
@@ -941,15 +935,14 @@ def main():
                 }
             })
         else:
-            # Append the block near the memory tag
+            anchor = full_memory_string or '[MODEL_MEMORY:'
             requests.append({
                 'replaceAllText': {
-                    'containsText': {'text': full_memory_string or '[MODEL_MEMORY:', 'matchCase': False},
-                    'replaceText': new_block + "\n" + (full_memory_string or '')
+                    'containsText': {'text': anchor, 'matchCase': False},
+                    'replaceText': new_block + "\n" + anchor
                 }
             })
 
-    # ---- persist markov memory ----
     new_memory_block = f"[MODEL_MEMORY: {model.to_json()}]"
     if full_memory_string:
         requests.append({
