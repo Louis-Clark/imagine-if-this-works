@@ -18,7 +18,7 @@ except Exception:
 SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_KEY")
 DOCUMENT_ID = os.environ.get("GOOGLE_DOC_ID")
 
-VEC_DIM = 64
+VEC_DIM = 32
 
 DEBUG = True
 
@@ -27,7 +27,7 @@ def dbg(*args):
         print("[DEBUG]", *args)
 
 
-# ---------- tiny vector math (works with or without numpy) ----------
+# ---------- tiny vector math ----------
 def _as_list(v):
     if isinstance(v, list):
         return v
@@ -243,7 +243,7 @@ def render_vectors_block(vectors, max_lines=800):
     lines = ["=== VECTORS ==="]
     items = list(vectors.items())[:max_lines]
     for name, vec in items:
-        nums = " ".join(f"{x:.3f}" for x in _to_list(vec))
+        nums = " ".join(f"{x:.2f}" for x in _to_list(vec))
         lines.append(f"{name} | {nums}")
     lines.append("=== END VECTORS ===")
     return "\n".join(lines)
@@ -395,7 +395,7 @@ def render_exchanges_block(exchanges, new_entry=None, max_lines=300):
 
 # ---------- model class ----------
 class DocMarkovNeuralMemory:
-    def __init__(self, n_gram=2, max_keys=3000, max_vocab=400, max_phrases=300):
+    def __init__(self, n_gram=2, max_keys=500, max_vocab=200, max_phrases=150):
         self.n_gram = n_gram
         self.max_keys = max_keys
         self.max_vocab = max_vocab
@@ -557,6 +557,8 @@ class DocMarkovNeuralMemory:
             '(', ')', '{', '}', '==', 'self.', '.get(', 'def ', 'for ',
             'if ', 'return ', 'import ', 'class ', 'tab.', '_tab', 'all_tabs',
             'document_tab', 'first_tab', 'body_content',
+            'SERVICE_ACCOUNT', 'GOOGLE_DOC', 'DOCUMENT_ID', 'SERVICE ACCOUNT',
+            'ACCOUNT JSON', 'BUILD SERVICE', 'JSON =', 'os.environ',
         ]
         hits = sum(1 for m in code_markers if m in text)
         if hits >= 2:
@@ -671,10 +673,19 @@ def extract_all_docs_data(doc):
                         full_text += elem['textRun'].get('content', '') + "\n"
     dbg(f"extract_all_docs_data: full_text len={len(full_text)}")
     dbg(f"extract_all_docs_data: preview={full_text[:200]!r}")
+
+    # canary: warn if python source slipped into the input
+    source_canaries = ['import os', 'def main', 'SERVICE_ACCOUNT_JSON', 'def extract_all_docs_data']
+    found_canaries = [c for c in source_canaries if c in full_text]
+    if found_canaries:
+        dbg(f"!!! WARNING: source code found in full_text! markers={found_canaries}")
+    else:
+        dbg("source code canary: clean (no python source markers in full_text)")
+
     match = re.search(r'\[MODEL_MEMORY:\s*(\{.*?\})\s*\]', full_text)
     saved_memory = match.group(1) if match else None
     full_memory_string = match.group(0) if match else None
-    dbg(f"extract_all_docs_data: memory found={saved_memory is not None}")
+    dbg(f"extract_all_docs_data: memory found={saved_memory is not None}, match_len={len(full_memory_string) if full_memory_string else 0}")
     return full_text, saved_memory, full_memory_string, all_tabs
 
 
@@ -822,7 +833,7 @@ def main():
     effects = parse_effects_block(full_text)
 
     dbg("--- model ---")
-    model = DocMarkovNeuralMemory(n_gram=2, max_keys=3000, max_vocab=400, max_phrases=300)
+    model = DocMarkovNeuralMemory(n_gram=2, max_keys=500, max_vocab=200, max_phrases=150)
     if saved_memory:
         model.from_json(saved_memory)
         dbg(f"loaded model: tick={model.tick} mood={model.mood:.2f} w={len(model.weights)}")
@@ -940,7 +951,7 @@ def main():
             r_vec = encoder.embed(response)
             exch_vec = _norm(_add(q_vec, r_vec, 1.0))
             new_exchange_raw = (
-                f"{model.tick} | " + " ".join(f"{x:.3f}" for x in _to_list(exch_vec)) +
+                f"{model.tick} | " + " ".join(f"{x:.2f}" for x in _to_list(exch_vec)) +
                 f" | {question[:60]!r} | {response[:60]!r}"
             )
             dbg(f"exchange recorded: {new_exchange_raw[:80]!r}")
@@ -980,7 +991,7 @@ def main():
         else:
             raise ValueError("No [MODEL_MEMORY: {...}] block found. Add one at the bottom of tab 1.")
 
-    dbg(f"self-training on reply")
+    dbg("self-training on reply")
     model.train(reply_text, is_self=True)
 
     dbg("naming check")
@@ -1028,7 +1039,7 @@ def main():
             del facts[f]
 
     dbg("--- rendering blocks ---")
-    new_vectors_block = render_vectors_block(vectors, max_lines=600)
+    new_vectors_block = render_vectors_block(vectors, max_lines=800)
     new_facts_block = render_facts_block(facts)
     new_influences_block = render_influences_block(influences)
     new_mood_block = render_mood_block(mood)
@@ -1093,7 +1104,7 @@ def main():
         result = service.documents().batchUpdate(
             documentId=document_id, body={'requests': requests}
         ).execute()
-        dbg(f"batchUpdate OK, new revisionId={result.get('documentId', '?')} replies={len(result.get('replies', []))}")
+        dbg(f"batchUpdate OK, replies={len(result.get('replies', []))}")
         print(f"Updated. tick={model.tick} mood={model.mood:.2f} named={named_this_tick}")
     else:
         dbg("NO REQUESTS — nothing to do")
